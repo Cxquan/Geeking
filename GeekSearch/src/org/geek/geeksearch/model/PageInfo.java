@@ -3,11 +3,14 @@ package org.geek.geeksearch.model;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.geek.geeksearch.indexer.Tokenizer;
 import org.geek.geeksearch.util.DBOperator;
 
 /**
@@ -17,21 +20,29 @@ import org.geek.geeksearch.util.DBOperator;
 public class PageInfo implements Cloneable{
 	private final long docID;
 	private String url;
+	private String turl;
 	private String title = "";
 	private String description = "";
 	private String pubTime = ""; //网页发布时间
-	private String keyWords = "";
+	private String keyWords;
 	private String type = ""; // 考虑枚举常量enum
+	private String source = "";//将网页来源
+	
+	private int descriLength = 50; //限制description长度
+
 	private Map<String, List<Integer>> titleHlightPos = new HashMap<String, List<Integer>>();// 标题高亮位置
 	private Map<String, List<Integer>> descHlightPos = new HashMap<String, List<Integer>>();// 摘要高亮位置
-	
+	public String getTurl(){
+		return url;
+	}
+	/* for IndexGenerator */
 	public PageInfo(long docID, String url, String type, String title, String pubTime, String keywords, String descrip) {
 		this.docID = docID;
 		this.url = url;
 		this.type = type;
 		this.title = title;
 		this.pubTime = pubTime;
-		this.keyWords = keywords;
+		this.keyWords = Tokenizer.doTokenise(keywords).toString();
 		this.description = descrip;
 	}
 	
@@ -41,7 +52,7 @@ public class PageInfo implements Cloneable{
 	}
 	
 	public boolean loadInfo(DBOperator dbOperator) {
-		String sql = " SELECT * FROM PAGESINDEX WHERE DocID='"+docID+"' ";
+		String sql = " SELECT * FROM pagesindex WHERE DocID='"+docID+"' ";
 		ResultSet rSet = dbOperator.executeQuery(sql);
 		if (rSet == null) {
 			return false;
@@ -50,11 +61,23 @@ public class PageInfo implements Cloneable{
 			while (rSet.next()) {
 				url = rSet.getString("Url");
 				title = rSet.getString("Title");
-				description = rSet.getString("Description");
+				String desc = rSet.getString("Description");
+				if (desc == null || desc.isEmpty()) {
+					description = (title.length() < descriLength ? title :
+						title.substring(0, 50)) +"...";
+				} else {
+					description = (desc.length() < descriLength ? desc :
+						desc.substring(0, 50)) +"...";
+				}
+				
 				title = rSet.getString("Title");
-				pubTime = rSet.getString("Date");
 				type = rSet.getString("Type");
-				keyWords = rSet.getString("keywords");				
+				keyWords = rSet.getString("keywords");
+				source = typeToSource();
+				pubTime = rSet.getString("Date").trim();
+				if (pubTime.equals("null") || pubTime.isEmpty()) {
+					pubTime = "\\(╯-╰)/";
+				}
 			}
 		} catch (SQLException e) {
 			e.printStackTrace();
@@ -63,8 +86,22 @@ public class PageInfo implements Cloneable{
 		return true;
 	}
 	
+	private String typeToSource() {
+		if (type.equals("qq")) {
+			return "腾讯体育";
+		} else if (type.equals("163")){
+			return "网易体育";
+		} else if (type.equals("msn")){
+			return "MSN体育";
+		} else if (type.equals("sohu")){
+			return "搜狐体育";
+		} else {
+			return "~自己看~";
+		}
+	}
+	
 	public void add2DB(DBOperator dbOp) {
-		String sql = " INSERT INTO PagesIndex values("+docID+",'"+url+"','"+title
+		String sql = " INSERT INTO pagesindex values("+docID+",'"+url+"','"+title
 				+"','"+description+"','"+pubTime+"','"+type+"','"+keyWords+"') ";
 		dbOp.executeUpdate(sql);
 	}
@@ -73,6 +110,44 @@ public class PageInfo implements Cloneable{
 	public Object clone() throws CloneNotSupportedException{
 		Object object = super.clone();
 		return object;
+	}
+	
+	/* 计算title和description中搜索词出现的此处，返回权重。1次+8*/
+	public long countInTitleDesc(String term) {
+		String text = title + description;
+		long weight = 0;
+		int start = 0;
+		
+		int idx = text.indexOf(term, start);
+		while (idx >= 0) {
+			weight += 8;
+			start = idx + term.length();
+			idx = start < text.length() ? text.indexOf(term, start) : -1;
+		}
+		System.out.print(" 词:"+term+" "+weight);
+		return weight;
+	}
+	
+	/* 计算发布日期与当前时间距离，返回权重。*/
+	public long countPubTimeWeight() {
+		long weight = 0;
+		if (pubTime.length() < 10) {
+			return 0;
+		}
+		try {
+			String time = pubTime.substring(0, 11).replaceAll("-", "")+"000000";
+			Calendar calendar = Calendar.getInstance();
+			calendar.setTime(new SimpleDateFormat("yyyyMMddHHmmss").parse(time));
+			long t = calendar.getTimeInMillis();
+			long cur = System.currentTimeMillis();
+			//时间权重公式
+			weight = (long)Math.pow(Math.log(cur / (cur-t)), 2);
+			
+		} catch (Exception e) {
+			
+		}
+		System.out.println(" 时间权重:"+weight);
+		return weight;
 	}
 	
 	/* 计算 title/description 高亮位置 */
@@ -135,6 +210,10 @@ public class PageInfo implements Cloneable{
 		this.description = description;
 	}
 	
+	public long getDocID() {
+		return docID;
+	}
+	
 	public String getPubTime() {
 		return pubTime;
 	}
@@ -144,11 +223,14 @@ public class PageInfo implements Cloneable{
 	}
 	
 	public String[] getKeyWords() {
-		return keyWords.split(",");
+		return parseKeyWords(keyWords);
 	}
 	
-	public void setKeyWords(String keyWords) {
-		this.keyWords = keyWords;
+	public static String[] parseKeyWords(String keywords) {
+		if (keywords == null || keywords.isEmpty()) {
+			return null;
+		}
+		return keywords.replaceAll("[\\[\\]]", "").split(",");
 	}
 	
 	public String getType() {
@@ -174,6 +256,14 @@ public class PageInfo implements Cloneable{
 
 	public void setDescHlightPos(Map<String, List<Integer>> descHlightPos) {
 		this.descHlightPos = descHlightPos;
+	}
+	
+	public String getSource() {
+		return source;
+	}
+
+	public void setSource(String source) {
+		this.source = source;
 	}
 
 	//just for test
